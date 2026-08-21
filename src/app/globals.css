@@ -1,0 +1,58 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Cool slate backgrounds, white surfaces, deep charcoal text */
+    --background: 210 20% 96%; /* slate-ish */
+    --foreground: 221 39% 11%; /* #111827 deep charcoal */
+
+    --card: 0 0% 100%;
+    --card-foreground: 221 39% 11%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 221 39% 11%;
+
+    /* Primary = deep charcoal for rugged, high-contrast controls */
+    --primary: 221 39% 11%;
+    --primary-foreground: 210 20% 98%;
+
+    --secondary: 214 15% 91%;
+    --secondary-foreground: 221 39% 11%;
+
+    --muted: 214 15% 91%;
+    --muted-foreground: 215 14% 34%;
+
+    /* Accent = safety amber #F59E0B */
+    --accent: 38 92% 50%;
+    --accent-foreground: 221 39% 11%;
+
+    /* Destructive = hazard red #DC2626 */
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 215 14% 82%;
+    --input: 215 14% 72%;
+    --ring: 38 92% 50%;
+
+    --radius: 0.5rem;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  html {
+    -webkit-tap-highlight-color: transparent;
+  }
+  body {
+    @apply bg-background text-foreground antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  /* Visible focus for keyboard and switch users */
+  :focus-visible {
+    @apply outline-none ring-2 ring-ring ring-offset-2 ring-offset-background;
+  }
+}
