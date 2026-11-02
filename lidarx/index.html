@@ -1,0 +1,556 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LidarX</title>
+<meta name="description" content="View LiDAR point clouds in the browser. Open PLY, LAS, XYZ or PTS files. Nothing is uploaded.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23111'/%3E%3Ccircle cx='10' cy='21' r='2.5' fill='%2340c9a2'/%3E%3Ccircle cx='16' cy='12' r='2.5' fill='%23fde725'/%3E%3Ccircle cx='22' cy='19' r='2.5' fill='%2340c9a2'/%3E%3C/svg%3E">
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #fff;
+  --fg: #111;
+  --muted: #777;
+  --line: #e6e6e6;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0c0c0c;
+    --fg: #ededed;
+    --muted: #8c8c8c;
+    --line: #262626;
+  }
+}
+html {
+  background: var(--bg);
+  color: var(--fg);
+  font: 17px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+body { margin: 0; overflow: hidden; }
+canvas {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+  cursor: grab;
+}
+canvas:active { cursor: grabbing; }
+body.drop canvas { outline: 2px dashed var(--muted); outline-offset: -12px; }
+header {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 1rem;
+  pointer-events: none;
+}
+header > * { pointer-events: auto; }
+h1 {
+  margin: 0;
+  font-size: 1.125rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+button {
+  font: inherit;
+  font-size: 0.9375rem;
+  padding: 0.4rem 0.9rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--fg);
+  cursor: pointer;
+}
+button:hover { border-color: var(--muted); }
+button:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+#status {
+  position: fixed;
+  left: 1rem;
+  bottom: 1rem;
+  margin: 0;
+  font-size: 0.875rem;
+  color: var(--muted);
+}
+</style>
+</head>
+<body>
+<canvas id="view"></canvas>
+<header>
+  <h1>LidarX</h1>
+  <button id="open" type="button">Open</button>
+  <input id="file" type="file" accept=".ply,.las,.xyz,.pts,.txt,.csv" hidden>
+</header>
+<p id="status" aria-live="polite"></p>
+<script>
+'use strict';
+
+const MAX_POINTS = 2_000_000;
+const canvas = document.getElementById('view');
+const status = document.getElementById('status');
+const input = document.getElementById('file');
+const gl = canvas.getContext('webgl2', { antialias: false, powerPreference: 'high-performance' });
+
+function start() {
+  const program = link(`#version 300 es
+    in vec3 p; in vec3 c;
+    uniform mat4 mvp; uniform float size;
+    out vec3 vc;
+    void main() {
+      gl_Position = mvp * vec4(p, 1.0);
+      gl_PointSize = clamp(size / gl_Position.w, 1.0, size * 3.0);
+      vc = c;
+    }`, `#version 300 es
+    precision mediump float;
+    in vec3 vc; out vec4 o;
+    void main() { o = vec4(vc, 1.0); }`);
+  const uMvp = gl.getUniformLocation(program, 'mvp');
+  const uSize = gl.getUniformLocation(program, 'size');
+  const posBuf = gl.createBuffer();
+  const colBuf = gl.createBuffer();
+  gl.useProgram(program);
+  gl.enable(gl.DEPTH_TEST);
+  gl.bindBuffer(gl.ARRAY_BUFFER, posBuf);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
+  gl.bindBuffer(gl.ARRAY_BUFFER, colBuf);
+  gl.enableVertexAttribArray(1);
+  gl.vertexAttribPointer(1, 3, gl.UNSIGNED_BYTE, true, 0, 0);
+
+  let count = 0;
+  let dpr = 1;
+  let dirty = true;
+  let spin = true;
+  const view = { yaw: 0.6, pitch: 0.5, dist: 2.3 };
+
+  function resize() {
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    canvas.width = Math.round(canvas.clientWidth * dpr);
+    canvas.height = Math.round(canvas.clientHeight * dpr);
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    dirty = true;
+  }
+
+  function clearColor() {
+    let hex = getComputedStyle(document.documentElement).getPropertyValue('--bg').trim().slice(1);
+    if (hex.length === 3) hex = hex.replace(/./g, ch => ch + ch);
+    const n = parseInt(hex, 16);
+    gl.clearColor(((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255, 1);
+    dirty = true;
+  }
+
+  function draw() {
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    if (!count) return;
+    const cp = Math.cos(view.pitch);
+    const eye = [view.dist * cp * Math.cos(view.yaw), view.dist * cp * Math.sin(view.yaw), view.dist * Math.sin(view.pitch)];
+    const mvp = multiply(perspective(0.9, canvas.width / canvas.height, 0.01, 100), lookAt(eye, [0, 0, 0], [0, 0, 1]));
+    gl.uniformMatrix4fv(uMvp, false, mvp);
+    gl.uniform1f(uSize, 5 * dpr);
+    gl.drawArrays(gl.POINTS, 0, count);
+  }
+
+  function frame() {
+    if (spin) { view.yaw += 0.003; dirty = true; }
+    if (dirty) { draw(); dirty = false; }
+    requestAnimationFrame(frame);
+  }
+
+  function show(cloud, name) {
+    count = cloud.positions.length / 3;
+    gl.bindBuffer(gl.ARRAY_BUFFER, posBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, cloud.positions, gl.STATIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, colBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, cloud.colors, gl.STATIC_DRAW);
+    Object.assign(view, { yaw: 0.6, pitch: 0.5, dist: 2.3 });
+    spin = true;
+    dirty = true;
+    status.textContent = `${name} · ${count.toLocaleString()} points`;
+  }
+
+  async function open(file) {
+    status.textContent = `Reading ${file.name}`;
+    const buf = await file.arrayBuffer();
+    await new Promise(r => setTimeout(r, 0));
+    try {
+      show(normalize(parse(file.name, buf)), file.name);
+    } catch (e) {
+      status.textContent = `Can't read ${file.name}`;
+    }
+  }
+
+  // Interaction: drag rotates, wheel and pinch zoom, double click resets.
+  const pointers = new Map();
+  canvas.addEventListener('pointerdown', e => {
+    canvas.setPointerCapture(e.pointerId);
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    spin = false;
+  });
+  canvas.addEventListener('pointermove', e => {
+    const p = pointers.get(e.pointerId);
+    if (!p) return;
+    if (pointers.size === 1) {
+      view.yaw -= (e.clientX - p.x) * 0.005;
+      view.pitch = Math.max(-1.5, Math.min(1.5, view.pitch + (e.clientY - p.y) * 0.005));
+    } else if (pointers.size === 2) {
+      const [a, b] = [...pointers.values()];
+      const before = Math.hypot(a.x - b.x, a.y - b.y);
+      const q = { x: e.clientX, y: e.clientY };
+      const o = a === p ? b : a;
+      const after = Math.hypot(q.x - o.x, q.y - o.y);
+      if (before > 0 && after > 0) zoom(before / after);
+    }
+    p.x = e.clientX;
+    p.y = e.clientY;
+    dirty = true;
+  });
+  const release = e => pointers.delete(e.pointerId);
+  canvas.addEventListener('pointerup', release);
+  canvas.addEventListener('pointercancel', release);
+  canvas.addEventListener('wheel', e => {
+    e.preventDefault();
+    spin = false;
+    zoom(Math.exp(e.deltaY * 0.001));
+  }, { passive: false });
+  canvas.addEventListener('dblclick', () => {
+    Object.assign(view, { yaw: 0.6, pitch: 0.5, dist: 2.3 });
+    dirty = true;
+  });
+  function zoom(f) {
+    view.dist = Math.max(0.2, Math.min(20, view.dist * f));
+    dirty = true;
+  }
+
+  // Files: button, picker, drag and drop.
+  document.getElementById('open').addEventListener('click', () => input.click());
+  input.addEventListener('change', () => { if (input.files[0]) open(input.files[0]); input.value = ''; });
+  document.addEventListener('dragover', e => { e.preventDefault(); document.body.classList.add('drop'); });
+  document.addEventListener('dragleave', e => { if (!e.relatedTarget) document.body.classList.remove('drop'); });
+  document.addEventListener('drop', e => {
+    e.preventDefault();
+    document.body.classList.remove('drop');
+    if (e.dataTransfer.files[0]) open(e.dataTransfer.files[0]);
+  });
+
+  window.addEventListener('resize', resize);
+  matchMedia('(prefers-color-scheme: dark)').addEventListener('change', clearColor);
+  resize();
+  clearColor();
+  show(normalize({ positions: sample() }), 'Sample');
+  requestAnimationFrame(frame);
+
+  function link(vsSrc, fsSrc) {
+    const prog = gl.createProgram();
+    for (const [type, src] of [[gl.VERTEX_SHADER, vsSrc], [gl.FRAGMENT_SHADER, fsSrc]]) {
+      const sh = gl.createShader(type);
+      gl.shaderSource(sh, src);
+      gl.compileShader(sh);
+      if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(sh));
+      gl.attachShader(prog, sh);
+    }
+    gl.bindAttribLocation(prog, 0, 'p');
+    gl.bindAttribLocation(prog, 1, 'c');
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+    return prog;
+  }
+}
+
+// Matrices are column-major Float32Array(16), as WebGL expects.
+function perspective(fov, aspect, near, far) {
+  const f = 1 / Math.tan(fov / 2);
+  const m = new Float32Array(16);
+  m[0] = f / aspect;
+  m[5] = f;
+  m[10] = (far + near) / (near - far);
+  m[11] = -1;
+  m[14] = (2 * far * near) / (near - far);
+  return m;
+}
+
+function lookAt(eye, target, up) {
+  const z = norm([eye[0] - target[0], eye[1] - target[1], eye[2] - target[2]]);
+  const x = norm(cross(up, z));
+  const y = cross(z, x);
+  return new Float32Array([
+    x[0], y[0], z[0], 0,
+    x[1], y[1], z[1], 0,
+    x[2], y[2], z[2], 0,
+    -dot(x, eye), -dot(y, eye), -dot(z, eye), 1,
+  ]);
+}
+
+function multiply(a, b) {
+  const m = new Float32Array(16);
+  for (let c = 0; c < 4; c++) {
+    for (let r = 0; r < 4; r++) {
+      m[c * 4 + r] = a[r] * b[c * 4] + a[4 + r] * b[c * 4 + 1] + a[8 + r] * b[c * 4 + 2] + a[12 + r] * b[c * 4 + 3];
+    }
+  }
+  return m;
+}
+
+const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+const norm = v => { const l = Math.hypot(v[0], v[1], v[2]) || 1; return [v[0] / l, v[1] / l, v[2] / l]; };
+
+// Centers the cloud at the origin inside a unit sphere and fills in colors by height when the file has none.
+function normalize({ positions, colors }) {
+  let n = positions.length / 3;
+  if (n > MAX_POINTS) {
+    const step = Math.ceil(n / MAX_POINTS);
+    const kept = Math.ceil(n / step);
+    const p = new Float32Array(kept * 3);
+    const c = colors && new Uint8Array(kept * 3);
+    for (let i = 0, j = 0; i < n; i += step, j++) {
+      p[j * 3] = positions[i * 3];
+      p[j * 3 + 1] = positions[i * 3 + 1];
+      p[j * 3 + 2] = positions[i * 3 + 2];
+      if (c) { c[j * 3] = colors[i * 3]; c[j * 3 + 1] = colors[i * 3 + 1]; c[j * 3 + 2] = colors[i * 3 + 2]; }
+    }
+    positions = p;
+    colors = c;
+    n = kept;
+  }
+  if (!n) throw new Error('empty');
+  const min = [Infinity, Infinity, Infinity];
+  const max = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i < positions.length; i += 3) {
+    for (let k = 0; k < 3; k++) {
+      const v = positions[i + k];
+      if (v < min[k]) min[k] = v;
+      if (v > max[k]) max[k] = v;
+    }
+  }
+  const center = [0, 1, 2].map(k => (min[k] + max[k]) / 2);
+  const radius = Math.hypot(max[0] - min[0], max[1] - min[1], max[2] - min[2]) / 2 || 1;
+  const out = new Float32Array(positions.length);
+  for (let i = 0; i < positions.length; i += 3) {
+    out[i] = (positions[i] - center[0]) / radius;
+    out[i + 1] = (positions[i + 1] - center[1]) / radius;
+    out[i + 2] = (positions[i + 2] - center[2]) / radius;
+  }
+  if (!colors) {
+    colors = new Uint8Array(n * 3);
+    const span = max[2] - min[2] || 1;
+    for (let i = 0; i < n; i++) ramp((positions[i * 3 + 2] - min[2]) / span, colors, i * 3);
+  }
+  return { positions: out, colors };
+}
+
+const STOPS = [[68, 1, 84], [59, 82, 139], [33, 145, 140], [94, 201, 98], [253, 231, 37]];
+function ramp(t, out, at) {
+  const s = Math.max(0, Math.min(0.999999, t)) * (STOPS.length - 1);
+  const i = Math.floor(s);
+  const f = s - i;
+  for (let k = 0; k < 3; k++) out[at + k] = STOPS[i][k] + (STOPS[i + 1][k] - STOPS[i][k]) * f;
+}
+
+// Parsers return { positions: Float32Array, colors?: Uint8Array }.
+function parse(name, buf) {
+  const ext = name.toLowerCase().split('.').pop();
+  const head = String.fromCharCode(...new Uint8Array(buf, 0, Math.min(4, buf.byteLength)));
+  if (ext === 'las' || head === 'LASF') return parseLAS(buf);
+  if (ext === 'ply' || head.startsWith('ply')) return parsePLY(buf);
+  return parseText(buf);
+}
+
+function parseLAS(buf) {
+  const dv = new DataView(buf);
+  if (String.fromCharCode(dv.getUint8(0), dv.getUint8(1), dv.getUint8(2), dv.getUint8(3)) !== 'LASF') throw new Error('not LAS');
+  const minor = dv.getUint8(25);
+  const offset = dv.getUint32(96, true);
+  const format = dv.getUint8(104);
+  if (format & 0x80) throw new Error('LAZ is compressed');
+  const length = dv.getUint16(105, true);
+  let n = dv.getUint32(107, true);
+  if (minor >= 4) {
+    const big = dv.getBigUint64(247, true);
+    if (big > 0n) n = Number(big);
+  }
+  n = Math.min(n, Math.floor((buf.byteLength - offset) / length));
+  const scale = [131, 139, 147].map(o => dv.getFloat64(o, true));
+  const shift = [155, 163, 171].map(o => dv.getFloat64(o, true));
+  const rgbAt = { 2: 20, 3: 28, 5: 28, 7: 30, 8: 30, 10: 30 }[format & 0x3f] ?? -1;
+  const step = Math.max(1, Math.ceil(n / MAX_POINTS));
+  const kept = Math.ceil(n / step);
+  const positions = new Float32Array(kept * 3);
+  const raw = rgbAt >= 0 ? new Uint16Array(kept * 3) : null;
+  for (let i = 0, j = 0; i < n; i += step, j++) {
+    const at = offset + i * length;
+    positions[j * 3] = dv.getInt32(at, true) * scale[0] + shift[0];
+    positions[j * 3 + 1] = dv.getInt32(at + 4, true) * scale[1] + shift[1];
+    positions[j * 3 + 2] = dv.getInt32(at + 8, true) * scale[2] + shift[2];
+    if (raw) {
+      raw[j * 3] = dv.getUint16(at + rgbAt, true);
+      raw[j * 3 + 1] = dv.getUint16(at + rgbAt + 2, true);
+      raw[j * 3 + 2] = dv.getUint16(at + rgbAt + 4, true);
+    }
+  }
+  return { positions, colors: raw && bytes(raw) };
+}
+
+// LAS stores 16-bit color, but some writers only use 8 bits.
+function bytes(raw) {
+  let wide = false;
+  for (let i = 0; i < raw.length; i++) if (raw[i] > 255) { wide = true; break; }
+  const out = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) out[i] = wide ? raw[i] >> 8 : raw[i];
+  return out;
+}
+
+const PLY_SIZE = { char: 1, uchar: 1, int8: 1, uint8: 1, short: 2, ushort: 2, int16: 2, uint16: 2, int: 4, uint: 4, int32: 4, uint32: 4, float: 4, float32: 4, double: 8, float64: 8 };
+const PLY_READ = {
+  char: 'getInt8', int8: 'getInt8', uchar: 'getUint8', uint8: 'getUint8',
+  short: 'getInt16', int16: 'getInt16', ushort: 'getUint16', uint16: 'getUint16',
+  int: 'getInt32', int32: 'getInt32', uint: 'getUint32', uint32: 'getUint32',
+  float: 'getFloat32', float32: 'getFloat32', double: 'getFloat64', float64: 'getFloat64',
+};
+
+function parsePLY(buf) {
+  const u8 = new Uint8Array(buf);
+  const text = new TextDecoder('latin1').decode(u8.subarray(0, Math.min(u8.length, 65536)));
+  const endIdx = text.indexOf('end_header');
+  if (!text.startsWith('ply') || endIdx < 0) throw new Error('not PLY');
+  const headerEnd = text.indexOf('\n', endIdx) + 1;
+  let format = 'ascii';
+  let n = 0;
+  let inVertex = false;
+  let seenVertex = false;
+  const props = [];
+  for (const line of text.slice(0, headerEnd).split('\n')) {
+    const t = line.trim().split(/\s+/);
+    if (t[0] === 'format') format = t[1];
+    else if (t[0] === 'element') {
+      if (t[1] === 'vertex') { n = parseInt(t[2], 10); inVertex = true; seenVertex = true; }
+      else { if (!seenVertex) throw new Error('vertex is not the first element'); inVertex = false; }
+    } else if (t[0] === 'property' && inVertex) {
+      if (t[1] === 'list') throw new Error('list property in vertex');
+      props.push({ type: t[1], name: t[2] });
+    }
+  }
+  const idx = name => props.findIndex(p => p.name === name);
+  const xi = idx('x'), yi = idx('y'), zi = idx('z');
+  if (xi < 0 || yi < 0 || zi < 0) throw new Error('no xyz');
+  const ri = Math.max(idx('red'), idx('r'), idx('diffuse_red'));
+  const gi = Math.max(idx('green'), idx('g'), idx('diffuse_green'));
+  const bi = Math.max(idx('blue'), idx('b'), idx('diffuse_blue'));
+  const hasColor = ri >= 0 && gi >= 0 && bi >= 0;
+  const step = Math.max(1, Math.ceil(n / MAX_POINTS));
+  const kept = Math.ceil(n / step);
+  const positions = new Float32Array(kept * 3);
+  const colors = hasColor ? new Uint8Array(kept * 3) : null;
+  const colorScale = hasColor && PLY_SIZE[props[ri].type] === 4 ? 255 : 1;
+
+  if (format === 'ascii') {
+    const lines = new TextDecoder().decode(u8.subarray(headerEnd)).split('\n');
+    for (let i = 0, j = 0; i < n && i < lines.length; i += step, j++) {
+      const t = lines[i].trim().split(/\s+/);
+      positions[j * 3] = +t[xi];
+      positions[j * 3 + 1] = +t[yi];
+      positions[j * 3 + 2] = +t[zi];
+      if (colors) { colors[j * 3] = t[ri] * colorScale; colors[j * 3 + 1] = t[gi] * colorScale; colors[j * 3 + 2] = t[bi] * colorScale; }
+    }
+    return { positions, colors };
+  }
+
+  const little = format === 'binary_little_endian';
+  const offsets = [];
+  let stride = 0;
+  for (const p of props) {
+    if (!PLY_SIZE[p.type]) throw new Error('unknown type');
+    offsets.push(stride);
+    stride += PLY_SIZE[p.type];
+  }
+  const dv = new DataView(buf, headerEnd);
+  const avail = Math.floor(dv.byteLength / stride);
+  const read = i => dv[PLY_READ[props[i].type]];
+  const rx = read(xi), ry = read(yi), rz = read(zi);
+  for (let i = 0, j = 0; i < n && i < avail; i += step, j++) {
+    const at = i * stride;
+    positions[j * 3] = rx.call(dv, at + offsets[xi], little);
+    positions[j * 3 + 1] = ry.call(dv, at + offsets[yi], little);
+    positions[j * 3 + 2] = rz.call(dv, at + offsets[zi], little);
+    if (colors) {
+      colors[j * 3] = read(ri).call(dv, at + offsets[ri], little) * colorScale;
+      colors[j * 3 + 1] = read(gi).call(dv, at + offsets[gi], little) * colorScale;
+      colors[j * 3 + 2] = read(bi).call(dv, at + offsets[bi], little) * colorScale;
+    }
+  }
+  return { positions, colors };
+}
+
+// XYZ, PTS, CSV and similar: one point per line, x y z first, optional r g b after.
+function parseText(buf) {
+  const lines = new TextDecoder().decode(buf).split('\n');
+  const positions = new Float32Array(lines.length * 3);
+  const colors = new Uint8Array(lines.length * 3);
+  let n = 0;
+  let colored = 0;
+  for (const line of lines) {
+    const t = line.trim().split(/[\s,;]+/);
+    if (t.length < 3) continue;
+    const x = +t[0], y = +t[1], z = +t[2];
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
+    positions[n * 3] = x;
+    positions[n * 3 + 1] = y;
+    positions[n * 3 + 2] = z;
+    const at = t.length >= 7 ? 4 : t.length >= 6 ? 3 : -1;
+    if (at > 0) {
+      const r = +t[at], g = +t[at + 1], b = +t[at + 2];
+      if (isByte(r) && isByte(g) && isByte(b)) {
+        colors[n * 3] = r; colors[n * 3 + 1] = g; colors[n * 3 + 2] = b;
+        colored++;
+      }
+    }
+    n++;
+  }
+  if (!n) throw new Error('no points');
+  return { positions: positions.subarray(0, n * 3), colors: colored === n ? colors.subarray(0, n * 3) : null };
+}
+const isByte = v => Number.isInteger(v) && v >= 0 && v <= 255;
+
+// A generated town block that stands in for a scan until a file is opened.
+function sample() {
+  let seed = 7;
+  const rnd = () => { seed = (seed + 0x6D2B79F5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+  const P = [];
+  const add = (x, y, z) => P.push(x, y, z);
+  for (let i = 0; i < 110000; i++) {
+    const x = (rnd() - 0.5) * 80, y = (rnd() - 0.5) * 80;
+    add(x, y, 0.5 * Math.sin(x / 9) * Math.cos(y / 11) + (rnd() - 0.5) * 0.08);
+  }
+  const buildings = [[-22, -18, 14, 10, 9], [-4, -20, 10, 12, 15], [12, -16, 16, 10, 6], [-20, 8, 12, 14, 12], [6, 12, 18, 12, 21], [25, 2, 8, 8, 4], [26, 22, 10, 10, 7]];
+  for (const [cx, cy, w, d, h] of buildings) {
+    for (let i = 0, m = w * d * 30; i < m; i++) add(cx + (rnd() - 0.5) * w, cy + (rnd() - 0.5) * d, h + (rnd() - 0.5) * 0.06);
+    for (let i = 0, m = 2 * (w + d) * h * 14; i < m; i++) {
+      const u = rnd() * 2 * (w + d);
+      const z = rnd() * h;
+      if (u < w) add(cx - w / 2 + u, cy - d / 2, z);
+      else if (u < w + d) add(cx + w / 2, cy - d / 2 + (u - w), z);
+      else if (u < 2 * w + d) add(cx + w / 2 - (u - w - d), cy + d / 2, z);
+      else add(cx - w / 2, cy + d / 2 - (u - 2 * w - d), z);
+    }
+  }
+  for (let t = 0; t < 16; t++) {
+    const cx = (rnd() - 0.5) * 74, cy = (rnd() - 0.5) * 74;
+    const rc = 1.5 + rnd() * 1.8;
+    for (let i = 0; i < 160; i++) { const a = rnd() * Math.PI * 2; add(cx + 0.18 * Math.cos(a), cy + 0.18 * Math.sin(a), rnd() * 2.5); }
+    for (let i = 0; i < 2600; i++) {
+      const a = rnd() * Math.PI * 2, b = Math.acos(2 * rnd() - 1), r = rc * (0.9 + rnd() * 0.1);
+      add(cx + r * Math.sin(b) * Math.cos(a), cy + r * Math.sin(b) * Math.sin(a), 2.5 + rc + r * Math.cos(b));
+    }
+  }
+  return Float32Array.from(P);
+}
+
+if (gl) start();
+else status.textContent = 'WebGL is not available in this browser.';
+</script>
+</body>
+</html>
