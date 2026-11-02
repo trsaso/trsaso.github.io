@@ -1,58 +1,70 @@
-<div class="slider">
- <script src="//http://www.mudrosti.com/novo/animacija.js"></script>
-     <img src="http://i.imgur.com/Cd3FlPa.jpg" alt=""> 
-  
-    <img src="http://i.imgur.com/7sZylcD.jpg" alt="">
-       <div class="buttons"> <a href="#" class="prev"></a>
- <a href="#" class="next"></a>
-
-    </div> <span class="nav"></span>
-
-</div>
-<script src="//ajax.googleapis.com/ajax/libs/jquery/1.10.2/jquery.min.js"></script>
-<!-- We will make a simple accordian with hover effects 
-The markup will have a list with images and the titles-->
-<div class="accordian">
-	<ul>
-		<li>
-			<div class="image_title">
-				<a href="#">KungFu Panda</a>
-			</div>
-			<a href="http://www.mudrosti.com">
-				<img src="http://www.mudrosti.com/sliki/mudrosti/duri-i-ako-mravkata.jpg"/>
-			</a>
-		</li>
-		<li>
-			<div class="image_title">
-				<a href="#">Toy Story 2</a>
-			</div>
-			<a href="#">
-				<img src="http://thecodeplayer.com/uploads/media/40Ly3VB.jpg"/>
-			</a>
-		</li>
-		<li>
-			<div class="image_title">
-				<a href="#">Wall-E</a>
-			</div>
-			<a href="#">
-				<img src="http://thecodeplayer.com/uploads/media/00kih8g.jpg"/>
-			</a>
-		</li>
-		<li>
-			<div class="image_title">
-				<a href="#">Up</a>
-			</div>
-			<a href="#">
-				<img src="http://thecodeplayer.com/uploads/media/2rT2vdx.jpg"/>
-			</a>
-		</li>
-		<li>
-			<div class="image_title">
-				<a href="#">Cars 2</a>
-			</div>
-			<a href="#">
-				<img src="http://thecodeplayer.com/uploads/media/8k3N3EL.jpg"/>
-			</a>
-		</li>
-	</ul>
-</div>
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Saso Trenceski</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23111'/%3E%3Ctext x='16' y='22' font-family='system-ui,sans-serif' font-size='18' font-weight='600' fill='%23fff' text-anchor='middle'%3ES%3C/text%3E%3C/svg%3E">
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #fff;
+  --fg: #111;
+  --muted: #777;
+  --line: #e6e6e6;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0c0c0c;
+    --fg: #ededed;
+    --muted: #8c8c8c;
+    --line: #262626;
+  }
+}
+html {
+  background: var(--bg);
+  color: var(--fg);
+  font: 17px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+body { margin: 0; }
+main {
+  max-width: 30rem;
+  margin: 0 auto;
+  padding: 20vh 1rem 4rem;
+}
+h1 {
+  margin: 0 0 1.5rem;
+  font-size: 1.5rem;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+ul { margin: 0; padding: 0; list-style: none; }
+li + li { border-top: 1px solid var(--line); }
+a {
+  display: block;
+  padding: 0.75rem 0;
+  color: inherit;
+  text-decoration: none;
+}
+a:hover { color: var(--muted); }
+a:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+</style>
+</head>
+<body>
+<main>
+  <h1>Saso Trenceski</h1>
+  <nav>
+    <ul>
+      <li><a href="https://github.com/trsaso">GitHub</a></li>
+      <li><a href="https://codepen.io/trsaso">CodePen</a></li>
+      <li><a href="https://colab.research.google.com/github/trsaso/trsaso.github.io/blob/master/Train_YOLO_Models.ipynb">Train YOLO Models</a></li>
+    </ul>
+  </nav>
+</main>
+</body>
+</html>
